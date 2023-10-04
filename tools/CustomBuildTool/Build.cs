@@ -531,22 +531,19 @@ namespace CustomBuildTool
             return true;
         }
 
-        public static bool BuildDynamicHeaderFiles()
+        public static bool BuildDynamicData(string OutDir)
         {
-            //Program.PrintColorMessage(BuildTimeStamp(), ConsoleColor.DarkGray, false);
-            //Program.PrintColorMessage("Building dynamic headers...", ConsoleColor.Cyan);
+            Program.PrintColorMessage("Building dynamic data...", ConsoleColor.Cyan);
 
             try
             {
-                DynData.Execute();
+                DynData.Execute(OutDir);
             }
             catch (Exception ex)
             {
                 Program.PrintColorMessage($"[ERROR] {ex}", ConsoleColor.Red);
                 return false;
             }
-
-            Program.PrintColorMessage("Done!", ConsoleColor.Green);
 
             return true;
         }

@@ -449,10 +449,12 @@ NTSTATUS KsiInitializeCallbackThread(
     )
 {
     static PH_STRINGREF driverExtension = PH_STRINGREF_INIT(L".sys");
+    static PH_STRINGREF dynDataFile = PH_STRINGREF_INIT(L"ksidyn.bin");
     NTSTATUS status;
     PPH_STRING fileName = NULL;
     PPH_STRING ksiFileName = NULL;
     PPH_STRING ksiServiceName = NULL;
+    PPH_STRING dynData = NULL;
 
 #ifdef KSI_DEBUG_DELAY_SPLASHSCREEN
     if (CallbackContext) PhDelayExecution(1000);
@@ -463,6 +465,8 @@ NTSTATUS KsiInitializeCallbackThread(
     if (!(fileName = PhGetApplicationFileNameWin32()))
         goto CleanupExit;
     if (!(ksiFileName = PhGetBaseNameChangeExtension(&fileName->sr, &driverExtension)))
+        goto CleanupExit;
+    if (!(dynData = PhGetApplicationDirectoryFileName(&dynDataFile, TRUE)))
         goto CleanupExit;
 
     if (PhDoesFileExistWin32(PhGetString(ksiFileName)))
@@ -488,6 +492,7 @@ NTSTATUS KsiInitializeCallbackThread(
         config.ObjectName = &objectName->sr;
         config.PortName = &portName->sr;
         config.Altitude = &altitudeName->sr;
+        config.DynData = &dynData->sr;
         config.EnableNativeLoad = KsiEnableLoadNative;
         config.EnableFilterLoad = KsiEnableLoadFilter;
         config.DisableImageLoadProtection = disableImageLoadProtection;
@@ -575,6 +580,8 @@ CleanupExit:
         PhDereferenceObject(ksiFileName);
     if (fileName)
         PhDereferenceObject(fileName);
+    if (dynData)
+        PhDereferenceObject(dynData);
 
     if (CallbackContext)
     {

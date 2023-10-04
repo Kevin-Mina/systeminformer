@@ -196,19 +196,14 @@ typedef struct _KPH_DYNDATA
             }
         }
 
-        public static void Execute()
+        public static void Execute(string OutDir)
         {
             string manifestFile = "kphlib\\kphdyn.xml";
             string headerFile = "kphlib\\include\\kphdyn.h";
-            string sourceFile = "kphlib\\kphdyn.c";
 
-            LoadConfig(manifestFile, out string config, out string sig);
+            GenerateConfig(manifestFile, OutDir);
 
-            string header = GenerateHeader();
-            string source = GenerateSource(config, sig);
-
-            File.WriteAllText(headerFile, header);
-            File.WriteAllText(sourceFile, source);
+            File.WriteAllText(headerFile, GenerateHeader());
         }
 
         private static string GenerateHeader()
@@ -223,50 +218,13 @@ typedef struct _KPH_DYNDATA
             sb.AppendLine();
             sb.AppendLine(DynConfigC);
             sb.AppendLine();
-            sb.AppendLine("#ifdef _WIN64");
-            sb.AppendLine("extern CONST BYTE KphDynData[];");
-            sb.AppendLine("extern CONST ULONG KphDynDataLength;");
-            sb.AppendLine("extern CONST BYTE KphDynDataSig[];");
-            sb.AppendLine("extern CONST ULONG KphDynDataSigLength;");
-            sb.AppendLine("#endif");
 
             return sb.ToString();
         }
 
-        private static string GenerateSource(
-            string Config,
-            string Sig
-            )
-        {
-            StringBuilder sb = new StringBuilder(16348);
-
-            sb.AppendLine(FileHeader);
-            sb.AppendLine();
-            sb.AppendLine(Includes);
-            sb.AppendLine();
-            sb.AppendLine("#ifdef _WIN64");
-            sb.AppendLine("CONST BYTE KphDynData[] =");
-            sb.AppendLine("{");
-            sb.Append(Config);
-            sb.AppendLine("};");
-            sb.AppendLine();
-            sb.AppendLine("CONST ULONG KphDynDataLength = ARRAYSIZE(KphDynData);");
-            sb.AppendLine();
-            sb.AppendLine("CONST BYTE KphDynDataSig[] =");
-            sb.AppendLine("{");
-            sb.Append(Sig);
-            sb.AppendLine("};");
-            sb.AppendLine();
-            sb.AppendLine("CONST ULONG KphDynDataSigLength = ARRAYSIZE(KphDynDataSig);");
-            sb.AppendLine("#endif");
-
-            return sb.ToString();
-        }
-
-        private static void LoadConfig(
+        private static void GenerateConfig(
             string ManifestFile,
-            out string ConfigData,
-            out string SigData
+            string OutDir
             )
         {
             var xml = new XmlDocument();
@@ -309,9 +267,16 @@ typedef struct _KPH_DYNDATA
                 throw new Exception("Dynamic configuration is invalid!");
             }
 
-            string tempName = $"{Build.BuildWorkingFolder}\\tools\\CustomBuildTool\\bin\\Release\\" + Guid.NewGuid();
-            string configFile = $"{tempName}.bin";
-            string sigFile = $"{tempName}.sig";
+            string configFile = Path.Combine(OutDir, "ksidyn.bin");
+
+            Program.PrintColorMessage(configFile, ConsoleColor.Cyan);
+
+            if (File.Exists(configFile))
+            {
+                File.Delete(configFile);
+            }
+
+            Directory.CreateDirectory(OutDir);
 
             using (var file = new FileStream(configFile, FileMode.CreateNew))
             using (var writer = new BinaryWriter(file))
@@ -325,19 +290,7 @@ typedef struct _KPH_DYNDATA
                 writer.Write(MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(configs)));
             }
 
-            if (Verify.CreateSignatureFile(Verify.GetPath("kph.key"), configFile))
-            {
-                ConfigData = BytesToString(configFile);
-                SigData = BytesToString(sigFile);
-
-                Win32.DeleteFile(configFile);
-                Win32.DeleteFile(sigFile);
-            }
-            else
-            {
-                ConfigData = string.Empty;
-                SigData = string.Empty;
-            }
+            Verify.CreateSignatureFile(Verify.GetPath("kph.key"), configFile);
         }
 
         private static bool Validate(List<DynConfig> Configs, List<string> ConfigNames)
@@ -376,45 +329,6 @@ typedef struct _KPH_DYNDATA
             }
 
             return valid;
-        }
-
-        private static string BytesToString(string Path)
-        {
-            var file = File.ReadAllBytes(Path);
-
-            using (MemoryStream stream = new MemoryStream(file, false))
-            {
-                StringBuilder hex = new StringBuilder(64);
-                StringBuilder sb = new StringBuilder(8192);
-                Span<byte> bytes = stackalloc byte[8];
-
-                while (true)
-                {
-                    var len = stream.Read(bytes);
-
-                    if (len == 0)
-                    {
-                        break;
-                    }
-
-                    for (int i = 0; i < len; i++)
-                    {
-                        hex.AppendFormat("0x{0:x2}, ", bytes[i]);
-                    }
-                    hex.Remove(hex.Length - 1, 1);
-
-                    sb.Append("    ");
-                    sb.AppendLine(hex.ToString());
-                    hex.Clear();
-
-                    if (len < bytes.Length)
-                    {
-                        break;
-                    }
-                }
-
-                return sb.ToString();
-            }
         }
     }
 }

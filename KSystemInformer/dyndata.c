@@ -22,7 +22,6 @@ PAGED_FILE();
 static UNICODE_STRING KphpAltitudeValueName = RTL_CONSTANT_STRING(L"KphAltitude");
 static UNICODE_STRING KphpPortNameValueName = RTL_CONSTANT_STRING(L"KphPortName");
 static UNICODE_STRING KphpDynDataValueName = RTL_CONSTANT_STRING(L"DynData");
-static UNICODE_STRING KphpDynDataSigValueName = RTL_CONSTANT_STRING(L"DynDataSig");
 static UNICODE_STRING KphpDisableImageLoadProtectionValueName = RTL_CONSTANT_STRING(L"DisableImageLoadProtection");
 
 typedef struct _KPH_ACTIVE_DYNDATA
@@ -203,70 +202,102 @@ NTSTATUS KphOpenParametersKey(
 }
 
 /**
- * \brief Reads dynamic configuration from parameters.
+ * \brief Maps dynamic configuration from parameters.
  *
  * \param[in] KeyHandle Handle to the parameters registry key.
- * \param[out] DynData Set to the dynamic data blob, should be freed with
- * KphFreeRegistryBinay.
+ * \param[out] DynData Set to the dynamic data blob, should be unmapped with
+ * KphUnmapViewInSystem.
  *
  * \return Successful or errant status.
  */
 _IRQL_requires_max_(PASSIVE_LEVEL)
 _Must_inspect_result_
-NTSTATUS KphpReadDynamicConfiguration(
+NTSTATUS KphpMapDynamicConfiguration(
     _In_ HANDLE KeyHandle,
     _Out_ PKPH_DYNDATA* DynData
     )
 {
     NTSTATUS status;
-    PBYTE dataBuffer;
-    ULONG dataLength;
-    PBYTE sigBuffer;
-    ULONG sigLength;
-    ULONG actualLength;
+    PUNICODE_STRING fileName;
+    OBJECT_ATTRIBUTES objectAttributes;
+    HANDLE fileHandle;
+    IO_STATUS_BLOCK ioStatusBlock;
     PKPH_DYNDATA dynData;
+    SIZE_T dataLength;
+    ULONG version;
+    ULONG count;
+    ULONG actualLength;
 
     PAGED_CODE_PASSIVE();
 
     *DynData = NULL;
 
-    dataBuffer = NULL;
-    sigBuffer = NULL;
+    fileHandle = NULL;
+    dynData = NULL;
 
-    status = KphQueryRegistryBinary(KeyHandle,
+    status = KphQueryRegistryString(KeyHandle,
                                     &KphpDynDataValueName,
-                                    &dataBuffer,
-                                    &dataLength);
+                                    &fileName);
     if (!NT_SUCCESS(status))
     {
         KphTracePrint(TRACE_LEVEL_ERROR,
                       GENERAL,
-                      "KphQueryRegistryBinary failed: %!STATUS!",
+                      "KphQueryRegistryString failed: %!STATUS!",
                       status);
 
         goto Exit;
     }
 
-    status = KphQueryRegistryBinary(KeyHandle,
-                                    &KphpDynDataSigValueName,
-                                    &sigBuffer,
-                                    &sigLength);
+    InitializeObjectAttributes(&objectAttributes,
+                               fileName,
+                               OBJ_KERNEL_HANDLE,
+                               NULL,
+                               NULL);
+
+    status = KphCreateFile(&fileHandle,
+                           FILE_READ_ACCESS | SYNCHRONIZE,
+                           &objectAttributes,
+                           &ioStatusBlock,
+                           NULL,
+                           FILE_ATTRIBUTE_NORMAL,
+                           FILE_SHARE_READ,
+                           FILE_OPEN,
+                           FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                           NULL,
+                           0,
+                           0,
+                           KernelMode);
     if (!NT_SUCCESS(status))
     {
         KphTracePrint(TRACE_LEVEL_ERROR,
                       GENERAL,
-                      "KphQueryRegistryBinary failed: %!STATUS!",
+                      "Failed to open dynamic data file \"%wZ\": %!STATUS!",
+                      fileName,
                       status);
 
         goto Exit;
     }
 
-    status = KphVerifyBuffer(dataBuffer, dataLength, sigBuffer, sigLength);
+    dataLength = 0;
+    status = KphMapViewInSystem(fileHandle, 0, &dynData, &dataLength);
     if (!NT_SUCCESS(status))
     {
-        KphTracePrint(TRACE_LEVEL_CRITICAL,
+        KphTracePrint(TRACE_LEVEL_ERROR,
                       GENERAL,
-                      "KphVerifyBuffer failed: %!STATUS!",
+                      "Failed to map dynamic data file \"%wZ\": %!STATUS!",
+                      fileName,
+                      status);
+
+        goto Exit;
+    }
+
+    status = KphVerifyFile(fileName);
+    if (!NT_SUCCESS(status))
+    {
+        KphTracePrint(TRACE_LEVEL_ERROR,
+                      GENERAL,
+                      "Failed to verify dynamic data file \"%wZ\": %!STATUS!",
+                      fileName,
                       status);
 
         goto Exit;
@@ -282,21 +313,35 @@ NTSTATUS KphpReadDynamicConfiguration(
         goto Exit;
     }
 
-    dynData = (PKPH_DYNDATA)dataBuffer;
+    __try
+    {
+        version = dynData->Version;
+        count = dynData->Count;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        status = GetExceptionCode();
 
-    if (dynData->Version != KPH_DYN_CONFIGURATION_VERSION)
+        KphTracePrint(TRACE_LEVEL_ERROR,
+                      GENERAL,
+                      "Failed to read dynamic data file \"%wZ\": %!STATUS!",
+                      fileName,
+                      status);
+
+        goto Exit;
+    }
+
+    if (version != KPH_DYN_CONFIGURATION_VERSION)
     {
         KphTracePrint(TRACE_LEVEL_ERROR,
                       GENERAL,
                       "Dynamic configuration version mismatch");
 
-        status = STATUS_REVISION_MISMATCH;
+        status = STATUS_SI_DYNDATA_VERSION_MISMATCH;
         goto Exit;
     }
 
-    status = RtlULongMult(sizeof(KPH_DYN_CONFIGURATION),
-                          dynData->Count,
-                          &actualLength);
+    status = RtlULongMult(sizeof(KPH_DYN_CONFIGURATION), count, &actualLength);
     if (!NT_SUCCESS(status))
     {
         KphTracePrint(TRACE_LEVEL_ERROR,
@@ -330,20 +375,25 @@ NTSTATUS KphpReadDynamicConfiguration(
         goto Exit;
     }
 
-    *DynData = (PKPH_DYNDATA)dataBuffer;
-    dataBuffer = NULL;
+    *DynData = dynData;
+    dynData = NULL;
     status = STATUS_SUCCESS;
 
 Exit:
 
-    if (sigBuffer)
+    if (dynData)
     {
-        KphFreeRegistryBinary(sigBuffer);
+        KphUnmapViewInSystem(dynData);
     }
 
-    if (dataBuffer)
+    if (fileHandle)
     {
-        KphFreeRegistryBinary(dataBuffer);
+        ObCloseHandle(fileHandle, KernelMode);
+    }
+
+    if (fileName)
+    {
+        KphFreeRegistryString(fileName);
     }
 
     return status;
@@ -419,28 +469,42 @@ NTSTATUS KphDynamicDataInitialization(
         KphDynDisableImageLoadProtection = 0;
     }
 
-    status = KphpReadDynamicConfiguration(keyHandle, &dynData);
+    status = KphpMapDynamicConfiguration(keyHandle, &dynData);
     if (!NT_SUCCESS(status))
     {
         KphTracePrint(TRACE_LEVEL_ERROR,
                       GENERAL,
-                      "KphpReadDynamicConfiguration failed: %!STATUS!",
+                      "KphpMapDynamicConfiguration failed: %!STATUS!",
                       status);
 
         goto Exit;
     }
 
-    status = KphDynDataGetConfiguration(dynData,
-                                        KphKernelVersion.MajorVersion,
-                                        KphKernelVersion.MinorVersion,
-                                        KphKernelVersion.BuildNumber,
-                                        KphKernelVersion.Revision,
-                                        &config);
-    if (!NT_SUCCESS(status))
+    __try
     {
+        status = KphDynDataGetConfiguration(dynData,
+                                            KphKernelVersion.MajorVersion,
+                                            KphKernelVersion.MinorVersion,
+                                            KphKernelVersion.BuildNumber,
+                                            KphKernelVersion.Revision,
+                                            &config);
+        if (!NT_SUCCESS(status))
+        {
+            KphTracePrint(TRACE_LEVEL_ERROR,
+                          GENERAL,
+                          "KphDynDataGetConfiguration failed: %!STATUS!",
+                          status);
+
+            goto Exit;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        status = GetExceptionCode();
+
         KphTracePrint(TRACE_LEVEL_ERROR,
                       GENERAL,
-                      "KphDynDataGetConfiguration failed: %!STATUS!",
+                      "Failed to read dynamic configuration: %!STATUS!",
                       status);
 
         goto Exit;
@@ -460,7 +524,7 @@ Exit:
 
     if (dynData)
     {
-        KphFreeRegistryBinary((PBYTE)dynData);
+        KphUnmapViewInSystem(dynData);
     }
 
     if (keyHandle)
